@@ -1,0 +1,46 @@
+기본 기능 
+
+git pull ->
+git remote ->
+git clone ->
+git push origin -> git push <name> branch 이름
+git remote add <name> <url> 
+
+
+branch 만들기 
+git branch <name> 
+git branch develop
+
+branch 전환
+git checkout <branch name>
+git checkout develop
+git checkout -b develop // branch 생성과 checkout을 동시에 진행 
+
+
+git 정리 
+
+
+master branch에서 
+
+git branch -a 모든 branch 보기 
+
+
+git clone으로 remote 저장소에 있는 master branch를 가져올 수 있음
+
+clone을 통해 소스 로컬에 저장 및 리모트 저장소의 다른 branch 로컬 저장소 복사 및 전환 
+1. git clone <ssh url>  remote 저장소 master 복사 
+2. git branch -a 리모트 저장소의 모든 branch 보기 
+3. git checkout --track origin/develop  리모트 저장소의  develop branch 로컬 저장소에 생성 
+
+신규 branch 생성 및 push
+
+1. git branch //test 로컬 저장소에 test branch를 만듬 
+2. git branch  //branch 목록 보기
+3. git checkout test // test branch로 이동 
+
+
+
+
+
+
+
