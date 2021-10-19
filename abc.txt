@@ -28,6 +28,9 @@ git branch -a 모든 branch 보기
 git reset --hard --mixed, soft
 git revert
 
+branch 삭제
+git branch -d <name>
+
 
 로컬 저장소에
 
@@ -44,9 +47,3 @@ clone을 통해 소스 로컬에 저장 및 리모트 저장소의 다른 branch
 branch merge 하기
 'fast-forward (빨리감기) 병합
 신규 branch merge 하기
-
-1.
-
-
-branch 삭제
-git branch -d <name>
