@@ -39,11 +39,14 @@ clone을 통해 소스 로컬에 저장 및 리모트 저장소의 다른 branch
 2. git branch -a 리모트 저장소의 모든 branch 보기
 3. git checkout --track origin/develop  리모트 저장소의  develop branch 로컬 저장소에 생성
 
-신규 branch 생성 및 push
+신규 branch 생성 및 commit
 1. git branch //test 로컬 저장소에 test branch를 만듬
 2. git branch  //branch 목록 보기
 3. git checkout test // test branch로 이동
+4. git add "수정한 파일" // 수정한 파일 add
+5. git commit -m "파일 수정" // 수정한 내용 commit
 
-branch merge 하기
-'fast-forward (빨리감기) 병합
-신규 branch merge 하기
+신규 branch에 commit 내용 master에 merge 하기 ('fast-forward (빨리감기) 병합)
+1. git checkout master //master branch로 변경 
+2. git merge test // master branch에 test branch에 있는 내용을 merge
+3. git push // remote 저장소에 반영
