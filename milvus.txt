@@ -1,0 +1,93 @@
+import time
+from pymilvus import MilvusClient
+from sentence_transformers import SentenceTransformer
+
+def run_milvus_bge_m3_example():
+    # ---------------------------------------------------------
+    # 1. 설정 및 초기화
+    # ---------------------------------------------------------
+    
+    # BGE-M3 모델 로드 (다운로드 용량이 약 2~3GB로 큼)
+    print("Loading BGE-M3 Model... (This may take a while)")
+    model_name = "BAAI/bge-m3"
+    encoder = SentenceTransformer(model_name)
+    
+    # BGE-M3의 기본 Dense Vector 차원은 1024입니다.
+    MODEL_DIM = 1024 
+
+    # Milvus Lite 모드 실행
+    client = MilvusClient("./milvus_bge.db")
+    COLLECTION_NAME = "demo_bge_collection"
+
+    # 기존 컬렉션 초기화
+    if client.has_collection(COLLECTION_NAME):
+        client.drop_collection(COLLECTION_NAME)
+
+    # ---------------------------------------------------------
+    # 2. 컬렉션 생성 (차원 1024 설정 중요!)
+    # ---------------------------------------------------------
+    client.create_collection(
+        collection_name=COLLECTION_NAME,
+        dimension=MODEL_DIM,  # 1024
+        metric_type="COSINE"  
+    )
+    print(f"Collection '{COLLECTION_NAME}' created with dimension {MODEL_DIM}.")
+
+    # ---------------------------------------------------------
+    # 3. 데이터 준비
+    # ---------------------------------------------------------
+    # BGE-M3는 한국어를 매우 잘 이해하므로 조금 더 복잡한 문장도 테스트 가능합니다.
+    documents = [
+        "밀버스는 대규모 벡터 유사도 검색을 위한 고성능 오픈소스 데이터베이스입니다.",
+        "BGE-M3 모델은 다국어를 지원하며 희소(Sparse) 벡터와 밀집(Dense) 벡터를 모두 생성할 수 있습니다.",
+        "서울의 날씨는 오늘 매우 맑음이며 기온은 25도입니다.",
+        "생성형 AI의 발전으로 RAG(검색 증강 생성) 기술이 주목받고 있습니다."
+    ]
+
+    print("\nEncoding documents with BGE-M3...")
+    # BGE-M3로 임베딩 (normalize_embeddings=True를 권장하는 경우가 많음)
+    vectors = encoder.encode(documents, normalize_embeddings=True)
+
+    data = []
+    for i, doc in enumerate(documents):
+        data.append({
+            "id": i,
+            "vector": vectors[i],
+            "text": doc
+        })
+
+    # ---------------------------------------------------------
+    # 4. 데이터 삽입
+    # ---------------------------------------------------------
+    res = client.insert(collection_name=COLLECTION_NAME, data=data)
+    print(f"Inserted {res['insert_count']} documents.")
+
+    # ---------------------------------------------------------
+    # 5. 검색 (Search)
+    # ---------------------------------------------------------
+    query_text = "RAG 기술이란 무엇인가요?"
+    
+    # 질문 임베딩
+    query_vector = encoder.encode([query_text], normalize_embeddings=True)
+
+    print(f"\nQuerying: '{query_text}'")
+    
+    search_res = client.search(
+        collection_name=COLLECTION_NAME,
+        data=query_vector,
+        limit=2,
+        output_fields=["text"]
+    )
+
+    # ---------------------------------------------------------
+    # 6. 결과 출력
+    # ---------------------------------------------------------
+    print("\nSearch Results:")
+    for hits in search_res:
+        for hit in hits:
+            # Score가 1.0에 가까울수록 유사함
+            print(f"- Score: {hit['distance']:.4f}")
+            print(f"  Text:  {hit['entity'].get('text')}")
+
+if __name__ == "__main__":
+    run_milvus_bge_m3_example()
