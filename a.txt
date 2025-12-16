@@ -1,37 +1,31 @@
-111
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.pydantic_v1 import BaseModel, Field
 
+# 1. 데이터 구조 정의
+class CountryInfo(BaseModel):
+    name: str = Field(description="국가 이름")
+    capital: str = Field(description="수도 이름")
+    population: int = Field(description="인구 수 (숫자만)")
 
+# 2. 파서 설정
+parser = JsonOutputParser(pydantic_object=CountryInfo)
 
+# 3. 프롬프트 템플릿 (format_instructions 주입이 핵심)
+prompt = PromptTemplate(
+    template="사용자의 질문에 대해 답변하되, 반드시 다음 JSON 형식을 따르시오.\n{format_instructions}\n\n질문: {query}\n",
+    input_variables=["query"],
+    partial_variables={"format_instructions": parser.get_format_instructions()},
+)
 
-222222222
+# 4. 모델 및 체인 연결
+llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
+chain = prompt | llm | parser
 
+# 5. 실행
+response = chain.invoke({"query": "프랑스에 대해 알려줘"})
 
-
-33333
-
-
-11111111111
-
-
-
-aa
-
-
-bb
-
-
-
-안녕하세요
-
-가나다라 마바사
-
-
-추가추가우가
-
-
-추가추가추가충ㄹㄴㅇㄹ
-
-
-ddddddddddddd
-
-dddddddddddd
+# 6. 결과 확인 (Python Dictionary로 반환됨)
+print(response)
+# 출력 예시: {'name': 'France', 'capital': 'Paris', 'population': 67000000}
