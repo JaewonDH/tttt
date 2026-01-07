@@ -163,3 +163,7 @@ ask_manual_agent("필터는 어떻게 씻어?")
 
 # Case 3: 일반적인 인사 (검색 불필요)
 ask_manual_agent("안녕, 너는 누구니?")
+
+
+
+pip install langchain langchain-openai langchain-milvus langgraph pymilvus
