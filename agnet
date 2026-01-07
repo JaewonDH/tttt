@@ -1,0 +1,165 @@
+import os
+from langchain_community.document_loaders import TextLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings
+from langchain_milvus import Milvus
+
+# 1. 예제 매뉴얼 데이터 생성 (파일이 있다고 가정하거나 임시 생성)
+manual_text = """
+제품명: AI 청소기 X-2000 사용자 매뉴얼
+1. 전원 켜기: 본체 상단의 빨간색 버튼을 3초간 누르세요.
+2. 충전 방법: 배터리가 20% 미만일 때 자동으로 충전 스테이션으로 복귀합니다. 수동 충전은 홈 버튼을 누르세요.
+3. 필터 청소: 먼지통을 분리한 후, HEPA 필터를 물로 세척하고 24시간 건조하세요.
+4. 에러 코드 E-01: 바퀴에 이물질이 끼었을 때 발생합니다. 바퀴를 확인하세요.
+"""
+
+with open("manual.txt", "w", encoding="utf-8") as f:
+    f.write(manual_text)
+
+def ingest_manual_to_milvus():
+    # 2. 문서 로드
+    loader = TextLoader("manual.txt", encoding="utf-8")
+    docs = loader.load()
+
+    # 3. 문서 분할 (Splitting)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=100, chunk_overlap=20)
+    splits = text_splitter.split_documents(docs)
+
+    # 4. 임베딩 모델 설정
+    embeddings = OpenAIEmbeddings()
+
+    # 5. Milvus에 저장 (Vector Store 생성)
+    # connection_args에 uri를 파일 경로로 주면 Milvus Lite가 작동합니다.
+    vector_store = Milvus.from_documents(
+        documents=splits,
+        embedding=embeddings,
+        collection_name="user_manual_collection",
+        connection_args={"uri": "./milvus_demo.db"}, # 로컬 파일 DB 생성
+        drop_old=True  # 데모용: 기존 컬렉션 삭제 후 재생성
+    )
+    
+    print("✅ 매뉴얼 데이터가 Milvus에 성공적으로 저장되었습니다.")
+    return vector_store
+
+# 실행하여 DB 구축
+vector_store = ingest_manual_to_milvus()
+
+
+
+
+from langchain.tools.retriever import create_retriever_tool
+
+# 1. Retriever 생성
+retriever = vector_store.as_retriever(search_kwargs={"k": 2}) # 상위 2개 결과 검색
+
+# 2. Agent가 사용할 Tool로 변환
+tool = create_retriever_tool(
+    retriever,
+    name="manual_search",
+    description="사용자 매뉴얼에서 제품 사용법, 에러 코드, 청소 방법 등을 검색할 때 사용합니다."
+)
+
+tools = [tool]
+
+
+
+
+
+from typing import Annotated, Literal
+from typing_extensions import TypedDict
+
+from langchain_openai import ChatOpenAI
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode
+
+# 1. 그래프 상태(State) 정의
+# messages 리스트에 대화 기록이 계속 추가되는 구조입니다.
+class AgentState(TypedDict):
+    messages: Annotated[list, add_messages]
+
+# 2. LLM 모델 설정 및 도구 바인딩
+llm = ChatOpenAI(model="gpt-4o", temperature=0)
+llm_with_tools = llm.bind_tools(tools)
+
+# 3. 노드 함수 정의
+
+def agent_node(state: AgentState):
+    """
+    현재 상태(대화 기록)를 보고 LLM이 응답하거나 도구 호출을 결정하는 노드
+    """
+    messages = state["messages"]
+    response = llm_with_tools.invoke(messages)
+    return {"messages": [response]}
+
+def should_continue(state: AgentState) -> Literal["tools", END]:
+    """
+    LLM의 응답을 보고 도구를 실행해야 할지, 종료해야 할지 결정하는 조건부 엣지
+    """
+    messages = state["messages"]
+    last_message = messages[-1]
+    
+    # LLM이 도구 호출(tool_calls)을 요청했으면 'tools' 노드로 이동
+    if last_message.tool_calls:
+        return "tools"
+    # 아니면 종료
+    return END
+
+# 4. 그래프 구성 (Graph Construction)
+workflow = StateGraph(AgentState)
+
+# 노드 추가
+workflow.add_node("agent", agent_node)
+workflow.add_node("tools", ToolNode(tools)) # LangGraph가 제공하는 기본 도구 실행 노드
+
+
+# 엣지(Edge) 연결
+workflow.add_edge(START, "agent")
+
+# 조건부 엣지: agent -> (판단) -> tools 또는 END
+workflow.add_conditional_edges(
+    "agent",
+    should_continue,
+)
+
+# 도구 실행 후에는 다시 agent로 돌아와서 결과를 해석하게 함
+workflow.add_edge("tools", "agent")
+
+# 5. 그래프 컴파일
+app = workflow.compile()
+
+
+
+
+
+
+from langchain_core.messages import HumanMessage
+
+def ask_manual_agent(question: str):
+    print(f"\n🙋 사용자 질문: {question}")
+    
+    # 그래프 실행
+    inputs = {"messages": [HumanMessage(content=question)]}
+    
+    # stream을 사용하여 중간 과정을 볼 수 있습니다.
+    for event in app.stream(inputs):
+        for key, value in event.items():
+            print(f"  🔄 [Node: {key}] 처리 완료")
+            # 디버깅용: 도구 호출 내용 확인
+            if key == "agent" and value["messages"][0].tool_calls:
+                 print(f"     👉 도구 호출: {value['messages'][0].tool_calls[0]['name']}")
+
+    # 최종 응답 추출
+    final_state = app.invoke(inputs)
+    print(f"🤖 에이전트 답변: {final_state['messages'][-1].content}")
+
+# --- 테스트 케이스 ---
+
+# Case 1: 매뉴얼에 있는 내용 질문 (Milvus 검색 필요)
+ask_manual_agent("빨간불 에러(E-01)가 떴는데 어떻게 해야 해?")
+
+# Case 2: 매뉴얼에 있는 청소 방법 질문
+ask_manual_agent("필터는 어떻게 씻어?")
+
+# Case 3: 일반적인 인사 (검색 불필요)
+ask_manual_agent("안녕, 너는 누구니?")
