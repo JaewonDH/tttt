@@ -1,52 +1,186 @@
-기본 기능
+User 모델/레포도 함께 조회해야 하므로 각 계층을 수정해야 합니다.
 
-git pull ->
-git remote ->
-git clone ->
-git push origin -> git push <name> branch 이름
-git remote add <name> <url>
+---
 
+## `permissions/repository.py` - 유저 정보 조회 추가
 
-branch 만들기
-git branch <name>
-git branch develop
-
-branch 전환
-git checkout <branch name>
-git checkout develop
-git checkout -b develop // branch 생성과 checkout을 동시에 진행
+```python
+from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import exists
+from models import UserPermission, Permission, User
 
 
-git 정리
+class PermissionRepository:
+    def __init__(self, db: Session):
+        self.db = db
+
+    def has_any_permission(self, user_id: int) -> bool:
+        return self.db.query(
+            exists().where(UserPermission.user_id == user_id)
+        ).scalar()
+
+    def get_user_with_permissions(self, user_id: int) -> User | None:
+        """유저 정보 + 매핑된 권한 목록을 한 번의 쿼리로 조회"""
+        return (
+            self.db.query(User)
+            .options(
+                joinedload(User.permission_mappings)   # UserPermission 조인
+                .joinedload(UserPermission.permission) # Permission 조인
+            )
+            .filter(User.id == user_id)
+            .first()
+        )
+```
+
+---
+
+## `schemas.py` - 응답 스키마 추가
+
+```python
+from pydantic import BaseModel
+from datetime import datetime
+from typing import List
 
 
-master branch에서
+class PermissionResponse(BaseModel):
+    id: int
+    code: str
+    description: str | None = None
 
-git branch -a 모든 branch 보기
-
-
-git reset --hard --mixed, soft
-git revert
-
-branch 삭제
-git branch -d <name>
+    class Config:
+        from_attributes = True
 
 
-로컬 저장소에
+class UserPermissionCheckResponse(BaseModel):
+    """has_any_permission 체크 성공 시 반환 스키마"""
+    user_id: int
+    username: str
+    email: str
+    is_active: bool
+    created_at: datetime
+    has_any_permission: bool
+    permissions: List[PermissionResponse]
+    permission_count: int
 
-clone을 통해 소스 로컬에 저장 및 리모트 저장소의 다른 branch 로컬 저장소 복사 및 전환
-1. git clone <ssh url>  remote 저장소 master 복사
-2. git branch -a 리모트 저장소의 모든 branch 보기
-3. git checkout --track origin/develop  리모트 저장소의  develop branch 로컬 저장소에 생성
+    class Config:
+        from_attributes = True
+```
 
-신규 branch 생성 및 commit
-1. git branch //test 로컬 저장소에 test branch를 만듬
-2. git branch  //branch 목록 보기
-3. git checkout test // test branch로 이동
-4. git add "수정한 파일" // 수정한 파일 add
-5. git commit -m "파일 수정" // 수정한 내용 commit
+---
 
-신규 branch에 commit 내용 master에 merge 하기 ('fast-forward (빨리감기) 병합)
-1. git checkout master //master branch로 변경 
-2. git merge test // master branch에 test branch에 있는 내용을 merge
-3. git push // remote 저장소에 반영
+## `permissions/service.py` - 유저 정보 포함해서 반환
+
+```python
+from sqlalchemy.orm import Session
+from fastapi import HTTPException, status
+from schemas import UserPermissionCheckResponse, PermissionResponse
+from .repository import PermissionRepository
+
+
+class PermissionService:
+    def __init__(self, db: Session):
+        self.repo = PermissionRepository(db)
+
+    def check_has_any_permission(self, user_id: int) -> UserPermissionCheckResponse:
+        """
+        권한이 하나라도 있는지 확인 후
+        유저 정보 + 전체 권한 목록 반환
+        """
+        # 1. 유저 정보 + 권한 한 번에 조회
+        user = self.repo.get_user_with_permissions(user_id)
+
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"유저(id={user_id})를 찾을 수 없습니다.",
+            )
+
+        # 2. 매핑된 권한 추출
+        permissions = [m.permission for m in user.permission_mappings]
+
+        # 3. 권한이 하나도 없으면 403
+        if not permissions:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"유저(id={user_id})에게 매핑된 권한이 없습니다.",
+            )
+
+        # 4. 유저 정보 + 권한 목록 반환
+        return UserPermissionCheckResponse(
+            user_id=user.id,
+            username=user.username,
+            email=user.email,
+            is_active=user.is_active,
+            created_at=user.created_at,
+            has_any_permission=True,
+            permissions=[
+                PermissionResponse(
+                    id=p.id,
+                    code=p.code,
+                    description=p.description,
+                )
+                for p in permissions
+            ],
+            permission_count=len(permissions),
+        )
+```
+
+---
+
+## `permissions/router.py` - 응답 타입 명시
+
+```python
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+from database import get_db
+from schemas import UserPermissionCheckResponse
+from .service import PermissionService
+
+router = APIRouter(prefix="/permissions", tags=["permissions"])
+
+
+def get_permission_service(db: Session = Depends(get_db)) -> PermissionService:
+    return PermissionService(db)
+
+
+@router.get(
+    "/user/{user_id}/has-any",
+    response_model=UserPermissionCheckResponse,
+)
+def check_has_any_permission(
+    user_id: int,
+    service: PermissionService = Depends(get_permission_service),
+):
+    """유저 권한 존재 여부 확인 + 유저 전체 정보 반환"""
+    return service.check_has_any_permission(user_id)
+```
+
+---
+
+## 응답 예시
+
+```json
+{
+  "user_id": 1,
+  "username": "john",
+  "email": "john@example.com",
+  "is_active": true,
+  "created_at": "2024-01-15T09:00:00",
+  "has_any_permission": true,
+  "permissions": [
+    { "id": 1, "code": "POST_CREATE", "description": "게시글 작성" },
+    { "id": 2, "code": "POST_DELETE", "description": "게시글 삭제" }
+  ],
+  "permission_count": 2
+}
+```
+
+---
+
+## 핵심 변경 포인트
+
+| 항목 | 내용 |
+|------|------|
+| **쿼리 최적화** | `joinedload` 로 User + UserPermission + Permission을 **쿼리 1번**에 처리 (N+1 방지) |
+| **예외 분리** | 유저 없음 `404` / 권한 없음 `403` 케이스를 명확히 구분 |
+| **응답 스키마** | `UserPermissionCheckResponse`로 반환 타입을 Pydantic으로 고정 |
