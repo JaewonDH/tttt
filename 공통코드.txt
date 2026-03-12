@@ -1,0 +1,99 @@
+좋은 고민이에요! 핵심 질문은 이거예요.
+
+> **"의미가 같은 상태인가? 다른 상태인가?"**
+
+---
+
+## 판단 기준 먼저
+
+```
+일반 USER_STATUS:  활성 / 비활성 / 정지 / 탈퇴
+Agent USER_STATUS: 활성 / 비활성 / 정지 / 탈퇴 / 심사중 / 계약만료  ← 다름!
+```
+
+- **값이 완전히 동일** → 그냥 같은 코드 재사용
+- **Agent만의 고유 상태가 있음** → 분리 필요
+
+---
+
+## 분리가 필요하다면 — `module` 컬럼 추가
+
+`code_group`에 **module 컬럼**을 추가해서 네임스페이스를 분리하는 방법이에요.
+
+```sql
+CREATE TABLE code_group (
+    group_id      VARCHAR(50)  NOT NULL COMMENT '코드 그룹 ID (예: USER_STATUS)',
+    module        VARCHAR(50)  NOT NULL DEFAULT 'COMMON' COMMENT '모듈 (COMMON/USER/AGENT/PAYMENT)',
+    group_name    VARCHAR(100) NOT NULL COMMENT '그룹명',
+    description   VARCHAR(500)          COMMENT '그룹 설명',
+    is_active     BOOLEAN      NOT NULL DEFAULT TRUE,
+    created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    PRIMARY KEY (module, group_id)   -- ✅ 복합 PK로 변경
+) COMMENT '메타 코드 그룹';
+```
+
+```sql
+-- 데이터 예시
+INSERT INTO code_group (module, group_id, group_name) VALUES
+('COMMON', 'GENDER',         '성별'),          -- 공통 재사용
+('COMMON', 'YES_NO',         '여부'),           -- 공통 재사용
+('USER',   'USER_STATUS',    '회원 상태'),
+('AGENT',  'USER_STATUS',    '에이전트 상태'),  -- ✅ group_id 동일해도 OK
+('USER',   'PAYMENT_STATUS', '결제 상태'),
+('AGENT',  'PAYMENT_STATUS', '에이전트 정산 상태');
+```
+
+```sql
+-- code_detail도 module 포함 복합 FK
+CREATE TABLE code_detail (
+    module        VARCHAR(50)  NOT NULL COMMENT '모듈',
+    group_id      VARCHAR(50)  NOT NULL COMMENT '코드 그룹 ID',
+    code          VARCHAR(50)  NOT NULL COMMENT '코드값',
+    code_name     VARCHAR(100) NOT NULL COMMENT '코드명',
+    sort_order    INT          NOT NULL DEFAULT 0,
+    extra_val1    VARCHAR(200)          COMMENT '확장값1',
+    extra_val2    VARCHAR(200)          COMMENT '확장값2',
+    is_active     BOOLEAN      NOT NULL DEFAULT TRUE,
+    created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    PRIMARY KEY (module, group_id, code),
+    CONSTRAINT fk_code_detail_group
+        FOREIGN KEY (module, group_id) 
+        REFERENCES code_group(module, group_id)
+) COMMENT '메타 코드 상세';
+```
+
+```sql
+-- 비즈니스 테이블 주석 표기 방식 변경
+CREATE TABLE agents (
+    agent_id    BIGINT      NOT NULL AUTO_INCREMENT,
+    user_status VARCHAR(50) NOT NULL COMMENT '[CODE:AGENT.USER_STATUS]',    -- module.group_id
+    pay_status  VARCHAR(50) NOT NULL COMMENT '[CODE:AGENT.PAYMENT_STATUS]',
+    PRIMARY KEY (agent_id)
+);
+```
+
+---
+
+## 두 방식 최종 비교
+
+| | 접두사 방식 | module 컬럼 방식 |
+|---|---|---|
+| **그룹 ID** | `AGENT_USER_STATUS` | `USER_STATUS` (module로 구분) |
+| **직관성** | group_id만 봐도 파악 | module + group_id 조합 필요 |
+| **확장성** | 모듈 늘수록 이름 길어짐 | 모듈만 추가하면 됨 |
+| **중복 관리** | 비슷한 이름 난립 위험 | group_id 재사용으로 깔끔 |
+| **복잡도** | 단순 | PK 구조 변경 필요 |
+
+---
+
+## 실무 권장 결론
+
+```
+시스템 규모가 작다  →  접두사 방식 유지 (단순함이 최고)
+모듈이 3개 이상이다 →  module 컬럼 방식으로 설계
+```
+
+> 처음부터 `module` 컬럼 추가해두면 나중에 리팩토링 비용이 없어서  
+> **규모 무관하게 module 방식을 추천**드려요 😊
