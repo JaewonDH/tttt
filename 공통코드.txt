@@ -97,3 +97,18 @@ CREATE TABLE agents (
 
 > 처음부터 `module` 컬럼 추가해두면 나중에 리팩토링 비용이 없어서  
 > **규모 무관하게 module 방식을 추천**드려요 😊
+
+
+
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+# 경로에 값을 직접 포함
+name = "홍길동"
+json_path = f'$[*]?(@ .name == "{name}")'
+
+stmt = select(YourModel).where(
+    func.JSON_EXISTS(YourModel.json_column, json_path) == 1
+)
+
+result = session.execute(stmt).scalars().all()
