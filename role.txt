@@ -1,0 +1,49 @@
+
+from app.models.common_code import CommonCode
+from app.models.agent import AgentMember
+
+from app.models.user import User
+
+from sqlalchemy import select, case
+@router.get("/user-role")
+async def get_highest_priority_user_role(agent_id: str, user_id: str, db: Session = Depends(get_sync_db)):
+    
+    # 1. 우선순위 CASE 조건 정의 (SQLAlchemy의 case 함수 사용)
+    # 조건에 맞으면 지정된 숫자(1, 2, 3)를 반환하고, 없으면 99를 반환합니다.
+    priority_expr = case(
+        (CommonCode.code_id == 'owner', 1),
+        (CommonCode.code_id == 'dev', 2),
+        (CommonCode.code_id == 'user', 3),
+        else_=99
+    )
+
+    # 2. SQLAlchemy select 객체 생성
+    stmt = (
+        select(
+            AgentMember.user_id,
+            User.user_name,
+            CommonCode.code_id,
+            CommonCode.code_name
+        )
+        .join(CommonCode, AgentMember.role_code == CommonCode.code_id)
+        .join(User, User.user_id == AgentMember.user_id)
+        .where(AgentMember.agent_id == agent_id)
+        .where(AgentMember.user_id == user_id)
+        .order_by(priority_expr) # 위에서 만든 CASE 문으로 정렬
+    )
+
+    # 3. 쿼리 실행 및 첫 번째 결과만 추출
+    # .first()를 호출하면 SQLAlchemy가 오라클 버전에 맞춰 내부적으로 
+    # FETCH FIRST 1 ROWS ONLY 또는 ROWNUM 쿼리로 자동 변환하여 실행합니다.    
+    result =  db.execute(stmt).mappings().first()    
+    
+    if not result:
+        return {"message": "일치하는 데이터가 없습니다."}
+
+    # 4. 결과 반환
+    return {
+        "user_id": result.user_id,
+        "user_name": result.user_name,
+        "code_id": result.code_id,
+        "code_name": result.code_name
+    }
