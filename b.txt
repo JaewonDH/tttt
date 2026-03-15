@@ -1,12 +1,19 @@
-2222
+version: '3.8'
 
-dfsfs
+services:
+  oracle-db:
+    image: gvenzl/oracle-free
+    container_name: oracle_23ai
+    restart: unless-stopped
+    ports:
+      - "1521:1521"
+    environment:
+      - ORACLE_PASSWORD=oracle
+      - APP_USER=myuser
+      - APP_USER_PASSWORD=mypassword
 
-dddddd
+    volumes:
+      - oracle_data:/opt/oracle/oradata
 
-
-ccccccccccc
-
-
-
-ddddddddddddd
+volumes:
+  oracle_data:
