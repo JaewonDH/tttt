@@ -1,0 +1,381 @@
+"""
+FastAPI 채팅 API - 3가지 패턴
+프론트(React)에서 채팅 전달 후 응답까지의 흐름
+"""
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import openai
+import json
+import asyncio
+from typing import Optional
+
+app = FastAPI()
+
+# CORS 설정 (React 프론트 연동)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ─────────────────────────────────────────────
+# 공통 모델
+# ─────────────────────────────────────────────
+
+class ChatRequest(BaseModel):
+    message: str
+    session_id: str
+    model: Optional[str] = "gpt-4"
+
+
+class ChatResponse(BaseModel):
+    response: str
+    session_id: str
+
+
+# ─────────────────────────────────────────────
+# 패턴 1: 단순 요청/응답 (가장 기본)
+# React → POST → 응답 대기 → 한 번에 수신
+# ─────────────────────────────────────────────
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat_simple(req: ChatRequest):
+    """
+    프론트 호출:
+    const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: "안녕", session_id: "abc123" })
+    });
+    const data = await res.json();
+    console.log(data.response);
+    """
+
+    # 1) 대화 이력 조회 (DB 또는 Redis)
+    history = await get_chat_history(req.session_id)
+
+    # 2) LLM 호출
+    client = openai.AsyncOpenAI()
+    completion = await client.chat.completions.create(
+        model=req.model,
+        messages=[
+            {"role": "system", "content": "당신은 도움이 되는 AI 어시스턴트입니다."},
+            *history,
+            {"role": "user", "content": req.message},
+        ],
+    )
+
+    assistant_message = completion.choices[0].message.content
+
+    # 3) 대화 이력 저장
+    await save_chat_history(req.session_id, req.message, assistant_message)
+
+    # 4) 응답 반환
+    return ChatResponse(response=assistant_message, session_id=req.session_id)
+
+
+# ─────────────────────────────────────────────
+# 패턴 2: SSE 스트리밍 (실시간 글자 출력)
+# React → POST → 한 글자씩 실시간 수신
+# ─────────────────────────────────────────────
+
+@app.post("/api/chat/stream")
+async def chat_stream(req: ChatRequest):
+    """
+    프론트 호출:
+    const res = await fetch("/api/chat/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: "안녕", session_id: "abc123" })
+    });
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value);
+        // chunk = "data: {"content": "안"}\n\n"
+        // 파싱 후 화면에 이어붙이기
+    }
+    """
+
+    async def generate():
+        # 1) 대화 이력 조회
+        history = await get_chat_history(req.session_id)
+
+        # 2) LLM 스트리밍 호출
+        client = openai.AsyncOpenAI()
+        stream = await client.chat.completions.create(
+            model=req.model,
+            messages=[
+                {"role": "system", "content": "당신은 도움이 되는 AI 어시스턴트입니다."},
+                *history,
+                {"role": "user", "content": req.message},
+            ],
+            stream=True,  # ← 스트리밍 활성화
+        )
+
+        full_response = ""
+
+        # 3) 청크 단위로 프론트에 전달
+        async for chunk in stream:
+            delta = chunk.choices[0].delta
+            if delta.content:
+                full_response += delta.content
+                # SSE 형식으로 전송
+                yield f"data: {json.dumps({'content': delta.content})}\n\n"
+
+        # 4) 스트리밍 완료 후 대화 이력 저장
+        await save_chat_history(req.session_id, req.message, full_response)
+
+        # 5) 완료 신호
+        yield f"data: {json.dumps({'done': True})}\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+# ─────────────────────────────────────────────
+# 패턴 3: Agent + Celery 비동기 (복잡한 작업)
+# React → POST(작업등록) → 폴링/SSE로 결과 수신
+# ─────────────────────────────────────────────
+
+from celery import Celery
+from celery.result import AsyncResult
+import redis
+
+# Celery 설정
+celery_app = Celery(
+    "agent",
+    broker="redis://localhost:6379/0",
+    backend="redis://localhost:6379/1",
+)
+
+redis_client = redis.Redis(host="localhost", port=6379, db=2)
+
+
+# -- Celery Task (Agent Worker에서 실행됨) --
+@celery_app.task(bind=True)
+def run_agent_task(self, message: str, session_id: str):
+    """이 코드는 별도의 Celery Worker 프로세스에서 실행됨"""
+    import openai as sync_openai
+
+    # 중간 상태 업데이트 → 프론트에서 진행률 확인 가능
+    self.update_state(state="PROGRESS", meta={"step": "대화 이력 조회 중..."})
+
+    history = get_chat_history_sync(session_id)
+
+    self.update_state(state="PROGRESS", meta={"step": "AI가 생각 중..."})
+
+    # Agent 루프
+    client = sync_openai.OpenAI()
+    messages = [
+        {"role": "system", "content": "도구를 사용할 수 있는 AI Agent입니다."},
+        *history,
+        {"role": "user", "content": message},
+    ]
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "search_web",
+                "description": "웹 검색",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                },
+            },
+        }
+    ]
+
+    # Agent 루프: 도구 호출이 없을 때까지 반복
+    max_iterations = 5
+    for i in range(max_iterations):
+        response = client.chat.completions.create(
+            model="gpt-4", messages=messages, tools=tools
+        )
+
+        choice = response.choices[0]
+
+        # 도구 호출이 있으면 실행 후 계속
+        if choice.message.tool_calls:
+            messages.append(choice.message)
+
+            for tool_call in choice.message.tool_calls:
+                self.update_state(
+                    state="PROGRESS",
+                    meta={"step": f"도구 실행 중: {tool_call.function.name}"},
+                )
+
+                # 도구 실행
+                result = execute_tool(
+                    tool_call.function.name,
+                    json.loads(tool_call.function.arguments),
+                )
+
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps(result),
+                    }
+                )
+            continue
+
+        # 도구 호출 없으면 최종 응답
+        final = choice.message.content
+        save_chat_history_sync(session_id, message, final)
+
+        # Redis Pub/Sub으로 완료 알림
+        redis_client.publish(
+            f"chat:{session_id}",
+            json.dumps({"type": "complete", "content": final}),
+        )
+
+        return final
+
+    return "최대 반복 횟수를 초과했습니다."
+
+
+# -- FastAPI 엔드포인트 (Agent용) --
+
+@app.post("/api/chat/agent")
+async def chat_agent(req: ChatRequest):
+    """
+    프론트 호출 (작업 등록):
+    const res = await fetch("/api/chat/agent", {
+        method: "POST",
+        body: JSON.stringify({ message: "서울 날씨 알려줘", session_id: "abc123" })
+    });
+    const { task_id } = await res.json();
+    """
+    task = run_agent_task.delay(req.message, req.session_id)
+    return {"task_id": task.id, "status": "accepted"}
+
+
+@app.get("/api/chat/agent/status/{task_id}")
+async def chat_agent_status(task_id: str):
+    """
+    프론트에서 폴링:
+    const poll = setInterval(async () => {
+        const res = await fetch(`/api/chat/agent/status/${task_id}`);
+        const data = await res.json();
+        if (data.status === "done") {
+            clearInterval(poll);
+            setMessages(prev => [...prev, data.response]);
+        } else {
+            setThinking(data.step);  // "도구 실행 중: search_web"
+        }
+    }, 1000);
+    """
+    result = AsyncResult(task_id, app=celery_app)
+
+    if result.state == "PENDING":
+        return {"status": "pending", "step": "대기 중..."}
+
+    elif result.state == "PROGRESS":
+        return {"status": "progress", "step": result.info.get("step", "")}
+
+    elif result.state == "SUCCESS":
+        return {"status": "done", "response": result.get()}
+
+    elif result.state == "FAILURE":
+        return {"status": "error", "error": str(result.result)}
+
+    return {"status": result.state}
+
+
+@app.get("/api/chat/agent/stream/{session_id}")
+async def chat_agent_stream(session_id: str):
+    """
+    프론트에서 SSE로 실시간 수신:
+    const evtSource = new EventSource(`/api/chat/agent/stream/${session_id}`);
+    evtSource.onmessage = (e) => {
+        const data = JSON.parse(e.data);
+        if (data.type === "complete") {
+            setMessages(prev => [...prev, data.content]);
+            evtSource.close();
+        } else {
+            setThinking(data.step);
+        }
+    };
+    """
+
+    async def event_generator():
+        pubsub = redis_client.pubsub()
+        pubsub.subscribe(f"chat:{session_id}")
+
+        try:
+            while True:
+                message = pubsub.get_message(timeout=1.0)
+                if message and message["type"] == "message":
+                    data = json.loads(message["data"])
+                    yield f"data: {json.dumps(data)}\n\n"
+
+                    if data.get("type") == "complete":
+                        break
+                await asyncio.sleep(0.1)
+        finally:
+            pubsub.unsubscribe()
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+# ─────────────────────────────────────────────
+# 헬퍼 함수들
+# ─────────────────────────────────────────────
+
+async def get_chat_history(session_id: str) -> list:
+    """Redis에서 대화 이력 조회 (비동기)"""
+    # 실제로는 aioredis 또는 DB 사용
+    history = redis_client.lrange(f"history:{session_id}", 0, 39)
+    return [json.loads(h) for h in history] if history else []
+
+
+def get_chat_history_sync(session_id: str) -> list:
+    """Redis에서 대화 이력 조회 (동기 - Celery용)"""
+    history = redis_client.lrange(f"history:{session_id}", 0, 39)
+    return [json.loads(h) for h in history] if history else []
+
+
+async def save_chat_history(session_id: str, user_msg: str, assistant_msg: str):
+    """대화 이력 저장"""
+    pipe = redis_client.pipeline()
+    pipe.rpush(
+        f"history:{session_id}",
+        json.dumps({"role": "user", "content": user_msg}),
+        json.dumps({"role": "assistant", "content": assistant_msg}),
+    )
+    pipe.expire(f"history:{session_id}", 3600)  # 1시간 TTL
+    pipe.execute()
+
+
+def save_chat_history_sync(session_id: str, user_msg: str, assistant_msg: str):
+    """대화 이력 저장 (동기 - Celery용)"""
+    pipe = redis_client.pipeline()
+    pipe.rpush(
+        f"history:{session_id}",
+        json.dumps({"role": "user", "content": user_msg}),
+        json.dumps({"role": "assistant", "content": assistant_msg}),
+    )
+    pipe.expire(f"history:{session_id}", 3600)
+    pipe.execute()
+
+
+def execute_tool(tool_name: str, args: dict) -> dict:
+    """도구 실행"""
+    if tool_name == "search_web":
+        # 실제 검색 API 호출
+        return {"results": f"'{args['query']}' 검색 결과..."}
+    return {"error": "알 수 없는 도구"}
+
+
+# ─────────────────────────────────────────────
+# 실행: uvicorn chat_api:app --reload --port 8000
+# ─────────────────────────────────────────────
