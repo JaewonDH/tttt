@@ -1,0 +1,201 @@
+웹소켓 대신 **SSE(Server-Sent Events)**를 사용하는 방식으로 코드를 변경해 드리겠습니다.
+WebSocket은 양방향 통신인 반면, SSE는 **서버에서 클라이언트로의 단방향 통신**입니다. 따라서 클라이언트가 메시지를 보낼 때는 일반적인 **HTTP POST 요청**을 사용하고, 서버(AI)의 답변을 받을 때만 **SSE 연결(EventSource)**을 유지하며 스트리밍으로 받아오게 됩니다.
+이 방식은 특히 AI가 답변을 한 글자씩 생성하는 **타이핑 효과(Streaming)**를 구현할 때 HTTP 표준을 그대로 사용하므로 매우 효율적이고 구현이 깔끔합니다.
+### 1. API Server (FastAPI)
+SSE를 위해 StreamingResponse를 사용합니다. 클라이언트의 메시지 전송은 POST 라우터로, AI 응답 수신은 GET 라우터(스트리밍)로 분리됩니다.
+```python
+# api_server.py
+import json
+import asyncio
+from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import redis.asyncio as redis
+
+app = FastAPI()
+
+# React(프론트엔드)와의 통신을 위한 CORS 설정
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # 실제 운영시 프론트엔드 도메인으로 제한
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+redis_client = redis.Redis(host='localhost', port=6379, decode_responses=True)
+
+class ChatRequest(BaseModel):
+    message: str
+
+# 1. 클라이언트 메시지 수신 (HTTP POST)
+@app.post("/chat/{client_id}")
+async def send_message(client_id: str, req: ChatRequest):
+    # AI Agent가 처리할 수 있도록 Redis 큐에 작업 Push
+    payload = json.dumps({
+        "client_id": client_id,
+        "message": req.message
+    })
+    await redis_client.lpush("agent_tasks_queue", payload)
+    
+    # 작업이 큐에 들어갔음을 즉시 응답 (성공)
+    return {"status": "Message queued", "client_id": client_id}
+
+# 2. AI 응답 스트리밍 (SSE - Server-Sent Events)
+@app.get("/stream/{client_id}")
+async def stream_ai_responses(client_id: str, request: Request):
+    async def event_generator():
+        pubsub = redis_client.pubsub()
+        await pubsub.subscribe(f"response_{client_id}")
+        
+        try:
+            async for message in pubsub.listen():
+                # 클라이언트가 연결을 끊었는지 확인
+                if await request.is_disconnected():
+                    break
+                    
+                if message['type'] == 'message':
+                    # SSE 표준 포맷은 "data: {내용}\n\n" 입니다.
+                    yield f"data: {message['data']}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await pubsub.unsubscribe(f"response_{client_id}")
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+```
+### 2. AI Agent Server (FastAPI)
+Agent 서버는 큐를 보고 결과를 Pub/Sub으로 쏘는 역할만 하므로, **WebSocket 방식일 때와 코드가 100% 동일**합니다.
+```python
+# agent_server.py
+import json
+import asyncio
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+import redis.asyncio as redis
+
+redis_client = redis.Redis(host='localhost', port=6379, decode_responses=True)
+
+async def process_queue():
+    print("AI Agent Worker Started. Listening to queue...")
+    while True:
+        result = await redis_client.brpop("agent_tasks_queue", timeout=0)
+        
+        if result:
+            queue_name, payload = result
+            data = json.loads(payload)
+            client_id = data['client_id']
+            user_message = data['message']
+            
+            # [AI 비즈니스 로직 수행]
+            print(f"Processing message for {client_id}: {user_message}")
+            await asyncio.sleep(2) # LLM 연산 시뮬레이션
+            
+            ai_response = f"Agent의 답변입니다: '{user_message}' (SSE 방식)"
+            
+            # 처리 결과를 Redis Pub/Sub으로 발행
+            await redis_client.publish(f"response_{client_id}", ai_response)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    worker_task = asyncio.create_task(process_queue())
+    yield
+    worker_task.cancel()
+
+app = FastAPI(lifespan=lifespan)
+
+```
+### 3. Frontend (React)
+EventSource를 사용해 서버의 스트림을 구독하고, 메시지를 보낼 때는 일반 fetch API를 사용합니다.
+```javascript
+// Chat.jsx
+import React, { useState, useEffect, useRef } from 'react';
+
+function Chat() {
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState('');
+  
+  const clientId = useRef(Math.random().toString(36).substring(7));
+  const eventSourceRef = useRef(null);
+
+  useEffect(() => {
+    // 1. 컴포넌트 마운트 시 SSE 연결 (수신 전용)
+    const url = `http://localhost:8000/stream/${clientId.current}`;
+    eventSourceRef.current = new EventSource(url);
+    
+    // 2. 서버로부터 이벤트(메시지)가 도착했을 때의 처리
+    eventSourceRef.current.onmessage = (event) => {
+      setMessages((prev) => [...prev, { sender: 'ai', text: event.data }]);
+    };
+
+    eventSourceRef.current.onerror = (err) => {
+      console.error("EventSource failed:", err);
+      // 필요시 재연결 로직 추가
+    };
+
+    return () => {
+      // 언마운트 시 연결 종료
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+      }
+    };
+  }, []);
+
+  const sendMessage = async () => {
+    if (!input.trim()) return;
+
+    // 3. 내 화면에 메시지 먼저 추가 (Optimistic UI)
+    const userText = input;
+    setMessages((prev) => [...prev, { sender: 'user', text: userText }]);
+    setInput('');
+
+    // 4. API 서버로 메시지 전송 (HTTP POST)
+    try {
+      await fetch(`http://localhost:8000/chat/${clientId.current}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ message: userText }),
+      });
+    } catch (error) {
+      console.error("메시지 전송 실패:", error);
+    }
+  };
+
+  return (
+    <div style={{ maxWidth: '400px', margin: '0 auto' }}>
+      <div style={{ height: '400px', overflowY: 'scroll', border: '1px solid #ccc', padding: '10px' }}>
+        {messages.map((msg, index) => (
+          <div key={index} style={{ textAlign: msg.sender === 'user' ? 'right' : 'left', margin: '10px 0' }}>
+            <span style={{ 
+              background: msg.sender === 'user' ? '#007bff' : '#e9ecef', 
+              color: msg.sender === 'user' ? '#fff' : '#000',
+              padding: '8px 12px', 
+              borderRadius: '8px',
+              display: 'inline-block'
+            }}>
+              {msg.text}
+            </span>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: 'flex', marginTop: '10px' }}>
+        <input 
+          style={{ flex: 1, padding: '10px' }}
+          value={input} 
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
+          placeholder="메시지를 입력하세요..."
+        />
+        <button onClick={sendMessage} style={{ padding: '10px' }}>전송</button>
+      </div>
+    </div>
+  );
+}
+
+export default Chat;
+
+```
