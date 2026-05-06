@@ -4,6 +4,7 @@
 
 ### 1. 디렉토리 구조
 프로젝트는 다음과 같은 구조를 가집니다.
+```
 └── app/
     ├── core/                        # 공통 인프라 설정
     │   ├── config.py                
@@ -20,7 +21,7 @@
     │
     └── router/
         └── {domain_name}_router.py  # FastAPI 라우터
-
+```
 ### 2. 계층별 역할 및 핵심 규칙 (클린 아키텍처 기반)
 
 * **Router (`router/{domain_name}_router.py`)**:
